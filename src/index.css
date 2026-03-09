@@ -1,0 +1,326 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Calming teal/slate palette - designed to reduce interview stress */
+    --background: 210 20% 98%;
+    --foreground: 215 25% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 25% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 25% 15%;
+
+    /* Primary - Calming teal */
+    --primary: 174 62% 38%;
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 174 62% 48%;
+
+    /* Secondary - Soft slate */
+    --secondary: 215 20% 93%;
+    --secondary-foreground: 215 25% 25%;
+
+    --muted: 215 15% 94%;
+    --muted-foreground: 215 15% 50%;
+
+    /* Accent - Warm coral for action items */
+    --accent: 12 76% 61%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Success - Green for positive feedback */
+    --success: 152 60% 42%;
+    --success-foreground: 0 0% 100%;
+
+    /* Warning */
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --border: 215 20% 88%;
+    --input: 215 20% 88%;
+    --ring: 174 62% 38%;
+
+    --radius: 0.75rem;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(174, 62%, 38%) 0%, hsl(190, 65%, 45%) 100%);
+    --gradient-warm: linear-gradient(135deg, hsl(12, 76%, 61%) 0%, hsl(25, 80%, 55%) 100%);
+    --gradient-subtle: linear-gradient(180deg, hsl(210, 20%, 98%) 0%, hsl(210, 20%, 95%) 100%);
+    --gradient-glass: linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%);
+
+    /* Shadows */
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.05);
+    --shadow-glow: 0 0 30px rgba(47, 156, 149, 0.15);
+
+    /* Sidebar */
+    --sidebar-background: 215 25% 15%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 174 62% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 215 25% 22%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 215 25% 25%;
+    --sidebar-ring: 174 62% 48%;
+
+    /* Interview room specific */
+    --editor-bg: 220 16% 13%;
+    --editor-line: 220 16% 18%;
+    --video-overlay: rgba(0, 0, 0, 0.6);
+  }
+
+  .dark {
+    --background: 220 16% 10%;
+    --foreground: 210 20% 95%;
+
+    --card: 220 16% 13%;
+    --card-foreground: 210 20% 95%;
+
+    --popover: 220 16% 13%;
+    --popover-foreground: 210 20% 95%;
+
+    --primary: 174 62% 48%;
+    --primary-foreground: 220 16% 10%;
+    --primary-glow: 174 62% 58%;
+
+    --secondary: 220 16% 18%;
+    --secondary-foreground: 210 20% 90%;
+
+    --muted: 220 16% 18%;
+    --muted-foreground: 215 15% 55%;
+
+    --accent: 12 76% 61%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 60% 50%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --border: 220 16% 20%;
+    --input: 220 16% 20%;
+    --ring: 174 62% 48%;
+
+    --gradient-primary: linear-gradient(135deg, hsl(174, 62%, 48%) 0%, hsl(190, 65%, 55%) 100%);
+    --gradient-glass: linear-gradient(135deg, rgba(30,35,45,0.9) 0%, rgba(30,35,45,0.7) 100%);
+    
+    --shadow-glow: 0 0 30px rgba(79, 193, 186, 0.2);
+
+    --sidebar-background: 220 16% 8%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-accent: 220 16% 15%;
+    --sidebar-border: 220 16% 15%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-card/80 backdrop-blur-md border border-border/50;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: var(--gradient-primary);
+  }
+
+  .btn-gradient {
+    background-image: var(--gradient-primary);
+    @apply text-primary-foreground shadow-lg transition-all duration-300;
+  }
+
+  .btn-gradient:hover {
+    filter: brightness(1.1);
+    box-shadow: var(--shadow-glow);
+  }
+
+  .interview-card {
+    @apply bg-card rounded-xl border border-border/50 p-6 transition-all duration-300;
+    box-shadow: var(--shadow-md);
+  }
+
+  .interview-card:hover {
+    @apply border-primary/30;
+    box-shadow: var(--shadow-lg), var(--shadow-glow);
+    transform: translateY(-2px);
+  }
+
+  .status-badge {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium;
+  }
+
+  .status-scheduled {
+    @apply bg-primary/10 text-primary;
+  }
+
+  .status-in-progress {
+    @apply bg-warning/10 text-warning;
+  }
+
+  .status-completed {
+    @apply bg-success/10 text-success;
+  }
+
+  .status-cancelled {
+    @apply bg-destructive/10 text-destructive;
+  }
+
+  .video-container {
+    @apply relative rounded-xl overflow-hidden bg-black;
+    aspect-ratio: 16/9;
+  }
+
+  .video-overlay {
+    @apply absolute inset-0 flex items-center justify-center;
+    background: var(--video-overlay);
+  }
+
+  .editor-panel {
+    @apply bg-[hsl(var(--editor-bg))] rounded-xl overflow-hidden;
+  }
+
+  .rating-star {
+    @apply w-6 h-6 cursor-pointer transition-all duration-200;
+  }
+
+  .rating-star:hover {
+    transform: scale(1.2);
+  }
+
+  .nav-link {
+    @apply flex items-center gap-3 px-4 py-3 rounded-lg text-sidebar-foreground/70 transition-all duration-200;
+  }
+
+  .nav-link:hover {
+    @apply bg-sidebar-accent text-sidebar-foreground;
+  }
+
+  .nav-link.active {
+    @apply bg-sidebar-primary/10 text-sidebar-primary font-medium;
+  }
+
+  .input-field {
+    @apply bg-background border-border focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all duration-200;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out forwards;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.5s ease-out forwards;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.3s ease-out forwards;
+  }
+
+  .animate-pulse-soft {
+    animation: pulseSoft 2s ease-in-out infinite;
+  }
+
+  .animate-glow {
+    animation: glow 2s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulseSoft {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+@keyframes glow {
+  from {
+    box-shadow: 0 0 10px rgba(47, 156, 149, 0.3);
+  }
+  to {
+    box-shadow: 0 0 25px rgba(47, 156, 149, 0.5);
+  }
+}
+
+/* Monaco Editor Custom Theme */
+.monaco-editor {
+  @apply rounded-lg;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-border rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/30;
+}
