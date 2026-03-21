@@ -1,3 +1,4 @@
+// Fixed: removed email confirmation, fixed role assignment, added safety net upserts
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { User, Session } from '@supabase/supabase-js';
 import { supabase } from '@/integrations/supabase/client';
@@ -27,13 +28,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Set up auth state listener FIRST
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         setSession(session);
         setUser(session?.user ?? null);
-        
-        // Defer fetching profile and role to avoid deadlock
+
         if (session?.user) {
           setTimeout(() => {
             fetchUserData(session.user.id);
@@ -45,7 +44,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     );
 
-    // THEN check for existing session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setUser(session?.user ?? null);
@@ -61,24 +59,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const fetchUserData = async (userId: string) => {
     try {
-      // Fetch profile
       const { data: profileData } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', userId)
         .single();
-      
+
       if (profileData) {
         setProfile(profileData as Profile);
       }
 
-      // Fetch role
       const { data: roleData } = await supabase
         .from('user_roles')
         .select('role')
         .eq('user_id', userId)
         .single();
-      
+
       if (roleData) {
         setRole(roleData.role as UserRole);
       }
@@ -90,88 +86,76 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
     return { error: error as Error | null };
   };
 
-  // const signUp = async (email: string, password: string, fullName?: string, role?: 'interviewer' | 'candidate') => {
-  //   const { error } = await supabase.auth.signUp({
-  //     email,
-  //     password,
-  //     options: {
-  //       emailRedirectTo: `${window.location.origin}/`,
-  //       data: {
-  //         full_name: fullName,
-  //         role: role || 'candidate',
-  //       },
-  //     },
-  //   });
-  //   return { error: error as Error | null };
-  // };
-
   const signUp = async (
-  email: string,
-  password: string,
-  fullName?: string,
-  role?: 'interviewer' | 'candidate'
-) => {
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-  });
+    email: string,
+    password: string,
+    fullName?: string,
+    role?: 'interviewer' | 'candidate'
+  ) => {
+    // ── Step 1: Sign up — pass role + full_name in metadata so the
+    //           handle_new_user DB trigger can assign them automatically ──
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          full_name: fullName ?? '',
+          role: role ?? 'candidate',
+        },
+      },
+    });
 
-  if (error) {
-    return { error: error as Error };
-    console.log(error);
-  }
+    if (error) return { error: error as Error };
+    if (!data.user) return { error: new Error('Signup failed — no user returned') };
 
-  if (data.user) {
-    // Insert into profiles table
+    // ── Step 2: The DB trigger (handle_new_user) should have already
+    //           inserted profiles + user_roles rows. We do a manual
+    //           upsert here as a safety net in case the trigger is slow
+    //           or the user confirmed email later. ──────────────────────
+
+    // Small delay to let the trigger fire first
+    await new Promise(res => setTimeout(res, 500));
+
     const { error: profileError } = await supabase
       .from('profiles')
-      .insert([
-        {
-          id: data.user.id,
-          full_name: fullName,
-        },
-      ]);
+      .upsert({
+        id: data.user.id,
+        email: email,
+        full_name: fullName ?? '',
+      }, { onConflict: 'id' });
 
     if (profileError) {
-      return { error: profileError as Error };
+      console.error('Profile upsert error:', profileError.message);
+      // Non-fatal — trigger may have already inserted it
     }
 
-    // Insert into user_roles table
     const { error: roleError } = await supabase
       .from('user_roles')
-      .insert([
-        {
-          user_id: data.user.id,
-          role: role || 'candidate',
-        },
-      ]);
+      .upsert({
+        user_id: data.user.id,
+        role: role ?? 'candidate',
+      }, { onConflict: 'user_id,role' });
 
     if (roleError) {
-      return { error: roleError as Error };
+      console.error('Role upsert error:', roleError.message);
+      // Non-fatal — trigger may have already inserted it
     }
-  }
 
-  return { error: null };
-};
+    return { error: null };
+  };
+
   const signOut = async () => {
-    // Clear local state first to ensure UI updates even if signOut fails
     setUser(null);
     setSession(null);
     setProfile(null);
     setRole(null);
-    
-    // Attempt to sign out - ignore errors (e.g., session already expired)
     try {
       await supabase.auth.signOut({ scope: 'local' });
     } catch (error) {
-      // Session might already be invalid, which is fine
       console.log('Sign out completed (session may have been expired)');
     }
   };

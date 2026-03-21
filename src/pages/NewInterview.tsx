@@ -32,7 +32,7 @@ export default function NewInterview() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [candidates, setCandidates] = useState<Profile[]>([]);
-  
+
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -49,7 +49,6 @@ export default function NewInterview() {
 
   const fetchCandidates = async () => {
     try {
-      // Get all users with candidate role
       const { data: roleData } = await supabase
         .from('user_roles')
         .select('user_id')
@@ -61,7 +60,6 @@ export default function NewInterview() {
           .from('profiles')
           .select('*')
           .in('id', userIds);
-        
         setCandidates((profiles || []) as Profile[]);
       }
     } catch (error) {
@@ -71,19 +69,14 @@ export default function NewInterview() {
 
   const validateForm = () => {
     try {
-      interviewSchema.parse({
-        ...formData,
-        duration: Number(formData.duration),
-      });
+      interviewSchema.parse({ ...formData, duration: Number(formData.duration) });
       setErrors({});
       return true;
     } catch (error) {
       if (error instanceof z.ZodError) {
         const newErrors: Record<string, string> = {};
         error.errors.forEach((err) => {
-          if (err.path[0]) {
-            newErrors[err.path[0] as string] = err.message;
-          }
+          if (err.path[0]) newErrors[err.path[0] as string] = err.message;
         });
         setErrors(newErrors);
       }
@@ -94,39 +87,79 @@ export default function NewInterview() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validateForm() || !formData.date) return;
-    
+
     setLoading(true);
 
     try {
-      // Combine date and time
       const [hours, minutes] = formData.time.split(':');
       const scheduledAt = new Date(formData.date);
       scheduledAt.setHours(parseInt(hours), parseInt(minutes), 0, 0);
 
-      const { error } = await supabase
-        .from('interviews')
-        .insert({
-          title: formData.title.trim(),
-          description: formData.description.trim() || null,
-          scheduled_at: scheduledAt.toISOString(),
-          duration_minutes: formData.duration,
-          interviewer_id: user?.id,
-          candidate_id: formData.candidateId && formData.candidateId !== 'none' ? formData.candidateId : null,
-        });
+      // Generate ABC-123 room code
+      const letters = Array.from({ length: 3 }, () =>
+        String.fromCharCode(65 + Math.floor(Math.random() * 26))
+      ).join('');
+      const digits = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+      const roomCode = `${letters}-${digits}`;
 
-      if (error) throw error;
+      // Build insert payload — only include columns that exist in the schema
+      const payload: Record<string, any> = {
+        title: formData.title.trim(),
+        scheduled_at: scheduledAt.toISOString(),
+        status: 'scheduled',
+        interviewer_id: user?.id,
+        room_code: roomCode,
+      };
+
+      // Only add optional fields if they have values
+      if (formData.description.trim()) {
+        payload.description = formData.description.trim();
+      }
+
+      if (formData.candidateId && formData.candidateId !== 'none') {
+        payload.candidate_id = formData.candidateId;
+      }
+
+      // Try with duration_minutes first, fall back without it
+      const payloadWithDuration = { ...payload, duration_minutes: formData.duration };
+
+      console.log('Inserting interview:', payloadWithDuration);
+
+      let { error } = await supabase
+        .from('interviews')
+        .insert(payloadWithDuration);
+
+      // If duration_minutes column doesn't exist, try without it
+      if (error && (error.message?.includes('duration_minutes') || error.code === '42703')) {
+        console.warn('duration_minutes column missing, inserting without it');
+        const { error: error2 } = await supabase
+          .from('interviews')
+          .insert(payload);
+        if (error2) throw error2;
+      } else if (error) {
+        throw error;
+      }
 
       toast({
-        title: 'Interview scheduled!',
-        description: 'The interview has been created successfully.',
-      });
-      navigate('/interviews');
+  title: 'Interview scheduled!',
+  description: 'The interview has been created successfully.',
+});
+await new Promise(res => setTimeout(res, 800));
+navigate('/interviews');
     } catch (error: any) {
-      console.error('Error creating interview:', error);
-      let description = 'Failed to create interview. Please try again.';
-      if (error?.message?.includes('violates row-level security')) {
-        description = 'You don\'t have permission to create interviews. Only interviewers and admins can schedule interviews.';
-      }
+      // Log the FULL error so we can see exactly what's failing
+      console.error('Full error object:', error);
+      console.error('Error message:', error?.message);
+      console.error('Error code:', error?.code);
+      console.error('Error details:', error?.details);
+      console.error('Error hint:', error?.hint);
+
+      const description =
+        error?.message?.includes('duration_minutes') ? 'Missing column. Run: ALTER TABLE interviews ADD COLUMN duration_minutes INT DEFAULT 60;' :
+        error?.message?.includes('description') ? 'Missing column. Run: ALTER TABLE interviews ADD COLUMN description TEXT;' :
+        error?.message?.includes('row-level security') ? 'Permission denied. Check your role assignment in Supabase.' :
+        error?.message || 'Failed to create interview. Check browser console for details.';
+
       toast({
         title: 'Error',
         description,
@@ -145,13 +178,8 @@ export default function NewInterview() {
   return (
     <AppLayout>
       <div className="p-8 max-w-2xl mx-auto">
-        {/* Header */}
         <div className="mb-8 animate-fade-in">
-          <Button 
-            variant="ghost" 
-            onClick={() => navigate('/interviews')}
-            className="mb-4"
-          >
+          <Button variant="ghost" onClick={() => navigate('/interviews')} className="mb-4">
             <ArrowLeft className="h-4 w-4 mr-2" />
             Back to Interviews
           </Button>
@@ -201,12 +229,12 @@ export default function NewInterview() {
                       <Button
                         variant="outline"
                         className={cn(
-                          "w-full justify-start text-left font-normal input-field",
-                          !formData.date && "text-muted-foreground"
+                          'w-full justify-start text-left font-normal input-field',
+                          !formData.date && 'text-muted-foreground'
                         )}
                       >
                         <CalendarIcon className="mr-2 h-4 w-4" />
-                        {formData.date ? format(formData.date, "PPP") : "Pick a date"}
+                        {formData.date ? format(formData.date, 'PPP') : 'Pick a date'}
                       </Button>
                     </PopoverTrigger>
                     <PopoverContent className="w-auto p-0" align="start">
@@ -234,9 +262,7 @@ export default function NewInterview() {
                     </SelectTrigger>
                     <SelectContent>
                       {timeSlots.map((slot) => (
-                        <SelectItem key={slot} value={slot}>
-                          {slot}
-                        </SelectItem>
+                        <SelectItem key={slot} value={slot}>{slot}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -274,7 +300,7 @@ export default function NewInterview() {
                   <SelectTrigger className="input-field">
                     <SelectValue placeholder="Select a candidate" />
                   </SelectTrigger>
-                <SelectContent>
+                  <SelectContent>
                     <SelectItem value="none">No specific candidate</SelectItem>
                     {candidates.map((candidate) => (
                       <SelectItem key={candidate.id} value={candidate.id}>
