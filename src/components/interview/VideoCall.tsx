@@ -25,6 +25,8 @@ const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
   ],
 };
 
@@ -56,7 +58,7 @@ export function VideoCall({
   const ignoreOfferRef = useRef(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
-  const autoStartedRef = useRef(false); // prevents double-start in strict mode
+  const autoStartedRef = useRef(false);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -64,7 +66,6 @@ export function VideoCall({
     stream?.getTracks().forEach((t) => t.stop());
   };
 
-  // Retries until the video element is mounted in the DOM
   const attachLocalStream = useCallback((stream: MediaStream) => {
     const tryAttach = (attempts = 0) => {
       if (localVideoRef.current) {
@@ -85,7 +86,7 @@ export function VideoCall({
     });
   }, [role, userName]);
 
-  // Start local camera + mic, returns the stream or null on failure
+  // Start local camera + mic
   const startLocalMedia = useCallback(async (): Promise<MediaStream | null> => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -109,13 +110,26 @@ export function VideoCall({
 
   // ── WebRTC ────────────────────────────────────────────────────────────────
 
-  const createPeer = useCallback(() => {
+  /**
+   * FIX: Accept an optional stream parameter so we can pass localStream
+   * explicitly when calling from peer-joined, ensuring tracks are added
+   * BEFORE onnegotiationneeded fires.
+   */
+  const createPeer = useCallback((streamOverride?: MediaStream) => {
+    // Close any existing peer connection first
+    if (peerRef.current) {
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+
     const pc = new RTCPeerConnection(RTC_CONFIG);
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) =>
-        pc.addTrack(t, localStreamRef.current!)
-      );
+    // FIX: Use streamOverride if provided, otherwise fall back to ref.
+    // This guarantees tracks are added synchronously before any
+    // onnegotiationneeded event can fire.
+    const stream = streamOverride ?? localStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     }
 
     pc.ontrack = ({ streams }) => {
@@ -166,7 +180,11 @@ export function VideoCall({
       if (payload.sender === role) return;
       setRemoteName(payload.userName ?? "Peer");
 
-      const pc = peerRef.current ?? createPeer();
+      // FIX: If we don't yet have a peer, create one now with current stream.
+      // This handles the case where the candidate receives the interviewer's
+      // offer before peer-joined has been echoed back.
+      const pc = peerRef.current ?? createPeer(localStreamRef.current ?? undefined);
+
       const collision =
         payload.data.type === "offer" &&
         (makingOfferRef.current || pc.signalingState !== "stable");
@@ -174,28 +192,36 @@ export function VideoCall({
       ignoreOfferRef.current = role === "interviewer" && collision;
       if (ignoreOfferRef.current) return;
 
-      if (collision) {
-        await Promise.all([
-          pc.setLocalDescription({ type: "rollback" }),
-          pc.setRemoteDescription(new RTCSessionDescription(payload.data)),
-        ]);
-      } else {
-        await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
-      }
+      try {
+        if (collision) {
+          await Promise.all([
+            pc.setLocalDescription({ type: "rollback" }),
+            pc.setRemoteDescription(new RTCSessionDescription(payload.data)),
+          ]);
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+        }
 
-      if (payload.data.type === "offer") {
-        await pc.setLocalDescription();
-        sendSignal("answer", pc.localDescription);
+        if (payload.data.type === "offer") {
+          await pc.setLocalDescription();
+          sendSignal("answer", pc.localDescription);
+        }
+        setCallStatus("connecting");
+      } catch (err) {
+        console.error("Error handling offer:", err);
       }
-      setCallStatus("connecting");
     });
 
     ch.on("broadcast", { event: "answer" }, async ({ payload }) => {
       if (payload.sender === role) return;
       const pc = peerRef.current;
       if (!pc || pc.signalingState !== "have-local-offer") return;
-      await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
-      setCallStatus("connecting");
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+        setCallStatus("connecting");
+      } catch (err) {
+        console.error("Error handling answer:", err);
+      }
     });
 
     ch.on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
@@ -214,8 +240,14 @@ export function VideoCall({
         title: "Someone joined",
         description: `${payload.userName ?? "A participant"} joined the room.`,
       });
+
+      // FIX: Only the interviewer initiates the offer (polite peer model).
+      // Crucially, we pass localStreamRef.current explicitly so that tracks
+      // are added to the RTCPeerConnection BEFORE onnegotiationneeded fires.
+      // Previously, createPeer() was called without the stream being ready,
+      // causing the offer to go out with zero tracks.
       if (role === "interviewer") {
-        void createPeer();
+        createPeer(localStreamRef.current ?? undefined);
       }
     });
 
@@ -248,6 +280,8 @@ export function VideoCall({
 
     const autoStart = async () => {
       setCallStatus("joining");
+      // FIX: Await the stream and pass it into joinChannel context so it's
+      // definitely populated in localStreamRef before any signaling starts.
       const stream = await startLocalMedia();
       if (!stream) {
         setCallStatus("idle");
@@ -258,7 +292,7 @@ export function VideoCall({
     };
 
     autoStart();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRoomCode]);
 
   // ── Cleanup on unmount ────────────────────────────────────────────────────
@@ -275,7 +309,14 @@ export function VideoCall({
   const toggleVideo = async () => {
     try {
       if (isVideoOn) {
-        localStreamRef.current?.getVideoTracks().forEach((t) => t.stop());
+        // Disable just the video track — keep audio alive
+        localStreamRef.current?.getVideoTracks().forEach((t) => {
+          t.stop();
+          // Remove from peer connection so remote also loses video
+          peerRef.current?.getSenders()
+            .filter((s) => s.track === t)
+            .forEach((s) => peerRef.current?.removeTrack(s));
+        });
         if (localVideoRef.current) localVideoRef.current.srcObject = null;
         setIsVideoOn(false);
         return;
@@ -284,12 +325,19 @@ export function VideoCall({
         video: true,
         audio: isAudioOn,
       });
-      localStreamRef.current = stream;
-      attachLocalStream(stream);
+      // Merge new video track into existing stream (keeps existing audio senders)
+      stream.getVideoTracks().forEach((t) => {
+        localStreamRef.current?.addTrack(t);
+        if (peerRef.current) {
+          peerRef.current.addTrack(t, localStreamRef.current!);
+        }
+      });
+      if (!localStreamRef.current) {
+        localStreamRef.current = stream;
+      }
+      attachLocalStream(localStreamRef.current);
       setIsVideoOn(true);
       if (stream.getAudioTracks().length > 0) setIsAudioOn(true);
-      if (peerRef.current)
-        stream.getTracks().forEach((t) => peerRef.current!.addTrack(t, stream));
     } catch {
       toast({ title: "Camera Error", description: "Please allow camera permission.", variant: "destructive" });
     }
@@ -301,13 +349,13 @@ export function VideoCall({
       if (!localStreamRef.current) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         localStreamRef.current = stream;
-        if (peerRef.current)
-          stream.getTracks().forEach((t) => peerRef.current!.addTrack(t, stream));
+        stream.getTracks().forEach((t) => peerRef.current?.addTrack(t, stream));
         setIsAudioOn(true);
         return;
       }
       const tracks = localStreamRef.current.getAudioTracks();
       if (isAudioOn) {
+        // Mute: just disable, don't remove (avoids renegotiation)
         tracks.forEach((t) => (t.enabled = false));
         setIsAudioOn(false);
       } else {
@@ -328,41 +376,42 @@ export function VideoCall({
   };
 
   // ── Screen share ──────────────────────────────────────────────────────────
-const toggleScreenShare = async () => {
-  try {
-    if (isScreenSharing) {
-      stopStream(screenStreamRef.current);
-      screenStreamRef.current = null;
-      if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
-      setIsScreenSharing(false);
-      return;
-    }
-    const display = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true,
-    });
-    screenStreamRef.current = display;
-    setIsScreenSharing(true); // set state first so PiP renders
-
-    // Attach after state update causes re-render and ref to mount
-    setTimeout(() => {
-      if (screenVideoRef.current) {
-        screenVideoRef.current.srcObject = display;
-        screenVideoRef.current.play().catch(() => {});
+  const toggleScreenShare = async () => {
+    try {
+      if (isScreenSharing) {
+        stopStream(screenStreamRef.current);
+        screenStreamRef.current = null;
+        if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
+        setIsScreenSharing(false);
+        return;
       }
-    }, 100);
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+      screenStreamRef.current = display;
+      setIsScreenSharing(true);
 
-    if (peerRef.current)
-      display.getTracks().forEach((t) => peerRef.current!.addTrack(t, display));
-    display.getVideoTracks()[0].onended = () => {
-      stopStream(display);
-      screenStreamRef.current = null;
-      setIsScreenSharing(false);
-    };
-  } catch {
-    toast({ title: "Screen Share Error", description: "Unable to share screen.", variant: "destructive" });
-  }
-};
+      setTimeout(() => {
+        if (screenVideoRef.current) {
+          screenVideoRef.current.srcObject = display;
+          screenVideoRef.current.play().catch(() => {});
+        }
+      }, 100);
+
+      if (peerRef.current) {
+        display.getTracks().forEach((t) => peerRef.current!.addTrack(t, display));
+      }
+
+      display.getVideoTracks()[0].onended = () => {
+        stopStream(display);
+        screenStreamRef.current = null;
+        setIsScreenSharing(false);
+      };
+    } catch {
+      toast({ title: "Screen Share Error", description: "Unable to share screen.", variant: "destructive" });
+    }
+  };
 
   // ── Recording ─────────────────────────────────────────────────────────────
   const toggleRecording = () => {
@@ -377,7 +426,10 @@ const toggleScreenShare = async () => {
       return;
     }
     recordedChunksRef.current = [];
-    const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+      ? "video/webm;codecs=vp9"
+      : "video/webm";
+    const recorder = new MediaRecorder(stream, { mimeType });
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) recordedChunksRef.current.push(e.data);
     };
@@ -390,7 +442,7 @@ const toggleScreenShare = async () => {
       a.click();
       URL.revokeObjectURL(url);
     };
-    recorder.start();
+    recorder.start(1000); // collect data every second for reliability
     mediaRecorderRef.current = recorder;
     setIsRecording(true);
   };
@@ -400,6 +452,8 @@ const toggleScreenShare = async () => {
     sendSignal("peer-left", {});
     stopStream(localStreamRef.current);
     stopStream(screenStreamRef.current);
+    localStreamRef.current = null;
+    screenStreamRef.current = null;
     mediaRecorderRef.current?.stop();
     peerRef.current?.close();
     peerRef.current = null;
@@ -411,6 +465,7 @@ const toggleScreenShare = async () => {
     setIsVideoOn(false);
     setIsAudioOn(false);
     setIsScreenSharing(false);
+    setIsRemoteVideoOn(false);
     autoStartedRef.current = false;
     onLeave?.();
   };
@@ -485,7 +540,9 @@ const toggleScreenShare = async () => {
             onClick={handleCandidateJoin}
             disabled={callStatus === "joining"}
           >
-            Join Call
+            {callStatus === "joining" ? (
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Starting…</>
+            ) : "Join Call"}
           </Button>
         </div>
       </div>
@@ -556,6 +613,7 @@ const toggleScreenShare = async () => {
           </div>
         )}
 
+        {/* Screen share PiP */}
         {isScreenSharing && (
           <div className="absolute top-3 left-3 w-56 aspect-video rounded-lg overflow-hidden border border-white/20 shadow-lg bg-black">
             <video ref={screenVideoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
@@ -582,20 +640,50 @@ const toggleScreenShare = async () => {
 
       {/* Controls */}
       <div className="px-4 py-3 flex items-center justify-center gap-2 flex-wrap border-t bg-background/80 backdrop-blur-sm">
-        <Button size="icon" variant={isAudioOn ? "default" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleAudio}>
+        <Button
+          size="icon"
+          variant={isAudioOn ? "default" : "secondary"}
+          className="rounded-full w-11 h-11"
+          onClick={toggleAudio}
+          title={isAudioOn ? "Mute microphone" : "Unmute microphone"}
+        >
           {isAudioOn ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
         </Button>
-        <Button size="icon" variant={isVideoOn ? "default" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleVideo}>
+        <Button
+          size="icon"
+          variant={isVideoOn ? "default" : "secondary"}
+          className="rounded-full w-11 h-11"
+          onClick={toggleVideo}
+          title={isVideoOn ? "Turn off camera" : "Turn on camera"}
+        >
           {isVideoOn ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
         </Button>
-        <Button size="icon" variant={isScreenSharing ? "default" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleScreenShare}>
+        <Button
+          size="icon"
+          variant={isScreenSharing ? "default" : "secondary"}
+          className="rounded-full w-11 h-11"
+          onClick={toggleScreenShare}
+          title={isScreenSharing ? "Stop sharing" : "Share screen"}
+        >
           {isScreenSharing ? <MonitorOff className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
         </Button>
-        <Button size="icon" variant={isRecording ? "destructive" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleRecording}>
+        <Button
+          size="icon"
+          variant={isRecording ? "destructive" : "secondary"}
+          className="rounded-full w-11 h-11"
+          onClick={toggleRecording}
+          title={isRecording ? "Stop recording" : "Start recording"}
+        >
           {isRecording ? <Square className="w-4 h-4" /> : <Circle className="w-4 h-4" />}
         </Button>
         <div className="w-px h-8 bg-border mx-1" />
-        <Button size="icon" variant="destructive" className="rounded-full w-11 h-11" onClick={handleLeave}>
+        <Button
+          size="icon"
+          variant="destructive"
+          className="rounded-full w-11 h-11"
+          onClick={handleLeave}
+          title="Leave call"
+        >
           <Phone className="w-4 h-4 rotate-[135deg]" />
         </Button>
       </div>

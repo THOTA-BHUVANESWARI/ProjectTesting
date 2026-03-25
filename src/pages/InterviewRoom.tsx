@@ -9,6 +9,7 @@ import { EvaluationPanel } from '@/components/interview/EvaluationPanel';
 import { InterviewChatbot } from '@/components/chat/InterviewChatbot';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -23,19 +24,108 @@ import {
   Loader2,
   AlertCircle,
   Bot,
+  Users,
 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
-// Detect if a string looks like a UUID or UUID fragment (no dashes in ABC-123 format)
 const looksLikeUUID = (str: string) =>
   /^[0-9a-f-]{8,}$/i.test(str) && !str.match(/^[A-Z]{3}-\d{3}$/);
 
+// ── Candidate Access Gate ────────────────────────────────────────────────────
+function CandidateAccessGate({
+  expectedCode,
+  onSuccess,
+}: {
+  expectedCode: string;
+  onSuccess: () => void;
+}) {
+  const [enteredCode, setEnteredCode] = useState('');
+  const [codeError, setCodeError] = useState('');
+  const [checking, setChecking] = useState(false);
+
+  const handleJoin = () => {
+    const trimmed = enteredCode.trim().toUpperCase();
+    if (!trimmed) {
+      setCodeError('Please enter the interview code.');
+      return;
+    }
+    setChecking(true);
+    setTimeout(() => {
+      if (trimmed === expectedCode.toUpperCase()) {
+        setCodeError('');
+        onSuccess();
+      } else {
+        setCodeError('Incorrect code. Please check with your interviewer.');
+      }
+      setChecking(false);
+    }, 400);
+  };
+
+  return (
+    <div className="h-full flex items-center justify-center bg-background">
+      <div className="w-full max-w-sm mx-auto bg-card rounded-2xl border border-border p-8 shadow-sm">
+        {/* Header */}
+        <div className="flex items-center gap-3 mb-6">
+          <div className="h-11 w-11 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+            <Users className="h-5 w-5 text-primary" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold leading-tight">Candidate Access</h2>
+            <p className="text-sm text-muted-foreground">Join your interview session</p>
+          </div>
+        </div>
+
+        {/* Code input */}
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Enter Interview Code</label>
+          <Input
+            placeholder="e.g. ABC-123"
+            value={enteredCode}
+            onChange={(e) => {
+              setEnteredCode(e.target.value.toUpperCase());
+              setCodeError('');
+            }}
+            onKeyDown={(e) => e.key === 'Enter' && handleJoin()}
+            className={cn(
+              'text-center text-base font-mono tracking-widest h-12',
+              codeError && 'border-destructive focus-visible:ring-destructive'
+            )}
+            maxLength={10}
+            autoFocus
+          />
+          {codeError && (
+            <p className="text-sm text-destructive text-center">{codeError}</p>
+          )}
+        </div>
+
+        {/* Join button */}
+        <Button
+          className="w-full h-11 mt-4 rounded-xl text-base font-medium"
+          onClick={handleJoin}
+          disabled={checking || !enteredCode.trim()}
+        >
+          {checking && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+          {checking ? 'Verifying…' : 'Join Interview'}
+        </Button>
+
+        {/* Reset link */}
+        <button
+          className="w-full mt-4 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          onClick={() => { setEnteredCode(''); setCodeError(''); }}
+        >
+          ← Enter Different Code
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Component ───────────────────────────────────────────────────────────
 export default function InterviewRoom() {
   const { roomCode } = useParams();
   const navigate = useNavigate();
   const { user, isInterviewer, isAdmin, isCandidate, loading: authLoading } = useAuth();
-  
 
   const [interview, setInterview] = useState<Interview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -45,20 +135,25 @@ export default function InterviewRoom() {
   const [showEvaluation, setShowEvaluation] = useState(false);
   const [showAssistant, setShowAssistant] = useState(false);
 
+  // Candidates must verify the room code before VideoCall mounts
+  const [videoUnlocked, setVideoUnlocked] = useState(false);
+
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   const isInterviewerOrAdmin = isInterviewer || isAdmin;
   const userRole: 'interviewer' | 'candidate' = isInterviewerOrAdmin
     ? 'interviewer'
     : 'candidate';
-  const userName =
-    user?.user_metadata?.full_name ?? user?.email ?? 'You';
+  const userName = user?.user_metadata?.full_name ?? user?.email ?? 'You';
 
- //const { loading: authLoading } = useAuth(); // add this to your destructuring at the top
+  useEffect(() => {
+    if (roomCode && !authLoading) fetchInterview();
+  }, [roomCode, authLoading]);
 
-useEffect(() => {
-  if (roomCode && !authLoading) fetchInterview();
-}, [roomCode, authLoading]);
+  // Interviewers/admins bypass the gate — they own the room
+  useEffect(() => {
+    if (isInterviewerOrAdmin) setVideoUnlocked(true);
+  }, [isInterviewerOrAdmin]);
 
   useEffect(() => {
     if (interview?.status === 'in_progress') {
@@ -73,11 +168,9 @@ useEffect(() => {
 
   const fetchInterview = async () => {
     if (!roomCode) return;
-
     try {
       let data: Interview | null = null;
 
-      // ── Strategy 1: look up by room_code (normal formatted code e.g. ABC-123) ──
       const { data: byCode, error: codeError } = await supabase
         .from('interviews')
         .select('*')
@@ -87,7 +180,6 @@ useEffect(() => {
       if (byCode) {
         data = byCode as Interview;
       } else if (looksLikeUUID(roomCode)) {
-        // ── Strategy 2: URL contains a UUID — look up by id (old records) ──────
         const { data: byId, error: idError } = await supabase
           .from('interviews')
           .select('*')
@@ -97,7 +189,6 @@ useEffect(() => {
         if (byId) {
           data = byId as Interview;
 
-          // If this old record has no proper room_code, generate + save one now
           if (!data.room_code || looksLikeUUID(data.room_code)) {
             const letters = Array.from({ length: 3 }, () =>
               String.fromCharCode(65 + Math.floor(Math.random() * 26))
@@ -116,12 +207,10 @@ useEffect(() => {
 
             if (!patchError && patched) {
               data = patched as Interview;
-              // Redirect to the clean URL so future reloads use the proper code
               navigate(`/room/${newCode}`, { replace: true });
-              return; // fetchInterview will re-run via the roomCode param change
+              return;
             }
           } else {
-            // Record already has a good room_code — just redirect to it
             navigate(`/room/${data.room_code}`, { replace: true });
             return;
           }
@@ -140,7 +229,6 @@ useEffect(() => {
 
       setInterview(data);
 
-      // Mark as in_progress when interviewer enters
       if (data.status === 'scheduled' && isInterviewerOrAdmin) {
         const { data: updated, error: updateError } = await supabase
           .from('interviews')
@@ -152,7 +240,6 @@ useEffect(() => {
         setInterview(updated as Interview);
       }
 
-      // Candidate claims slot
       if (isCandidate && !data.candidate_id && user) {
         const { error: claimError } = await supabase
           .from('interviews')
@@ -251,9 +338,7 @@ useEffect(() => {
             Exit
           </Button>
           <div className="h-6 w-px bg-border" />
-          <h1 className="font-semibold truncate max-w-xs">
-            {interview.title}
-          </h1>
+          <h1 className="font-semibold truncate max-w-xs">{interview.title}</h1>
           <Badge variant="outline" className="gap-1">
             <Clock className="h-3 w-3" />
             {formatTime(elapsedSeconds)}
@@ -261,7 +346,6 @@ useEffect(() => {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Mobile view toggle */}
           <div className="flex lg:hidden">
             <Button
               variant={activeView === 'code' ? 'default' : 'ghost'}
@@ -325,18 +409,27 @@ useEffect(() => {
 
           <ResizableHandle withHandle className="hidden lg:flex" />
 
+          {/* Video panel — shows gate for candidates until code is verified */}
           <ResizablePanel
             defaultSize={showEvaluation ? 30 : 40}
             minSize={25}
-            className={cn('p-4', activeView !== 'video' && 'hidden lg:block')}
+            className={cn(activeView !== 'video' && 'hidden lg:block')}
           >
-            {/* Always pass interview.room_code from DB — never the URL param */}
-            <VideoCall
-              roomCode={interview.room_code ?? undefined}
-              role={userRole}
-              userName={userName}
-              onLeave={() => navigate('/interviews')}
-            />
+            {!videoUnlocked && isCandidate ? (
+              <CandidateAccessGate
+                expectedCode={interview.room_code ?? ''}
+                onSuccess={() => setVideoUnlocked(true)}
+              />
+            ) : (
+              <div className="h-full p-4">
+                <VideoCall
+                  roomCode={interview.room_code ?? undefined}
+                  role={userRole}
+                  userName={userName}
+                  onLeave={() => navigate('/interviews')}
+                />
+              </div>
+            )}
           </ResizablePanel>
 
           {showEvaluation && canEvaluate && (

@@ -78,7 +78,6 @@ export default function InterviewLobby() {
 
     setLoading(true);
     try {
-      // Insert WITHOUT room_code — the DB trigger auto-generates ABC-123 format
       const { data, error } = await supabase
         .from('interviews')
         .insert({
