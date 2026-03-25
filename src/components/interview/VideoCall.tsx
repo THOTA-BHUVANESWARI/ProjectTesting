@@ -30,6 +30,10 @@ const RTC_CONFIG: RTCConfiguration = {
   ],
 };
 
+// How long to wait after a "disconnected" ICE state before giving up.
+// Brief network blips recover within 1-2 s; only "failed" is truly fatal.
+const ICE_DISCONNECT_GRACE_MS = 4000;
+
 export function VideoCall({
   roomCode: initialRoomCode,
   role,
@@ -59,6 +63,8 @@ export function VideoCall({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const autoStartedRef = useRef(false);
+  // FIX: timer ref for the ICE disconnect grace period
+  const iceDisconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -86,7 +92,6 @@ export function VideoCall({
     });
   }, [role, userName]);
 
-  // Start local camera + mic
   const startLocalMedia = useCallback(async (): Promise<MediaStream | null> => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -110,23 +115,25 @@ export function VideoCall({
 
   // ── WebRTC ────────────────────────────────────────────────────────────────
 
-  /**
-   * FIX: Accept an optional stream parameter so we can pass localStream
-   * explicitly when calling from peer-joined, ensuring tracks are added
-   * BEFORE onnegotiationneeded fires.
-   */
   const createPeer = useCallback((streamOverride?: MediaStream) => {
-    // Close any existing peer connection first
+    // Cancel any pending disconnect timer from a previous peer
+    if (iceDisconnectTimerRef.current) {
+      clearTimeout(iceDisconnectTimerRef.current);
+      iceDisconnectTimerRef.current = null;
+    }
+
+    // Null out handlers before closing to prevent stale state updates
     if (peerRef.current) {
+      peerRef.current.oniceconnectionstatechange = null;
+      peerRef.current.ontrack = null;
+      peerRef.current.onicecandidate = null;
+      peerRef.current.onnegotiationneeded = null;
       peerRef.current.close();
       peerRef.current = null;
     }
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
 
-    // FIX: Use streamOverride if provided, otherwise fall back to ref.
-    // This guarantees tracks are added synchronously before any
-    // onnegotiationneeded event can fire.
     const stream = streamOverride ?? localStreamRef.current;
     if (stream) {
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
@@ -134,12 +141,20 @@ export function VideoCall({
 
     pc.ontrack = ({ streams }) => {
       const [remote] = streams;
+      // FIX: Always (re-)attach remote stream. Handles renegotiation and
+      // cases where the element existed but srcObject was previously cleared.
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remote;
         remoteVideoRef.current.play().catch(() => {});
       }
       setIsRemoteVideoOn(true);
       setCallStatus("connected");
+
+      // FIX: Track mute/unmute reflects camera-off without flipping call state
+      remote.getVideoTracks().forEach((t) => {
+        t.onmute = () => setIsRemoteVideoOn(false);
+        t.onunmute = () => setIsRemoteVideoOn(true);
+      });
     };
 
     pc.onicecandidate = ({ candidate }) => {
@@ -147,7 +162,40 @@ export function VideoCall({
     };
 
     pc.oniceconnectionstatechange = () => {
-      if (["disconnected", "failed", "closed"].includes(pc.iceConnectionState)) {
+      const state = pc.iceConnectionState;
+
+      if (state === "connected" || state === "completed") {
+        // FIX: Clear any pending disconnect timer — connection recovered
+        if (iceDisconnectTimerRef.current) {
+          clearTimeout(iceDisconnectTimerRef.current);
+          iceDisconnectTimerRef.current = null;
+        }
+        setCallStatus("connected");
+        return;
+      }
+
+      if (state === "disconnected") {
+        // FIX: Don't immediately flip to "waiting". WebRTC often emits
+        // "disconnected" briefly during normal network variance and recovers.
+        // Only act after the grace period expires AND state is still bad.
+        if (iceDisconnectTimerRef.current) return; // timer already running
+        iceDisconnectTimerRef.current = setTimeout(() => {
+          iceDisconnectTimerRef.current = null;
+          const currentState = peerRef.current?.iceConnectionState;
+          if (currentState === "disconnected" || currentState === "failed") {
+            setIsRemoteVideoOn(false);
+            setCallStatus("waiting");
+          }
+        }, ICE_DISCONNECT_GRACE_MS);
+        return;
+      }
+
+      if (state === "failed" || state === "closed") {
+        // Immediately fatal — no grace period
+        if (iceDisconnectTimerRef.current) {
+          clearTimeout(iceDisconnectTimerRef.current);
+          iceDisconnectTimerRef.current = null;
+        }
         setIsRemoteVideoOn(false);
         setCallStatus("waiting");
       }
@@ -180,9 +228,6 @@ export function VideoCall({
       if (payload.sender === role) return;
       setRemoteName(payload.userName ?? "Peer");
 
-      // FIX: If we don't yet have a peer, create one now with current stream.
-      // This handles the case where the candidate receives the interviewer's
-      // offer before peer-joined has been echoed back.
       const pc = peerRef.current ?? createPeer(localStreamRef.current ?? undefined);
 
       const collision =
@@ -241,11 +286,6 @@ export function VideoCall({
         description: `${payload.userName ?? "A participant"} joined the room.`,
       });
 
-      // FIX: Only the interviewer initiates the offer (polite peer model).
-      // Crucially, we pass localStreamRef.current explicitly so that tracks
-      // are added to the RTCPeerConnection BEFORE onnegotiationneeded fires.
-      // Previously, createPeer() was called without the stream being ready,
-      // causing the offer to go out with zero tracks.
       if (role === "interviewer") {
         createPeer(localStreamRef.current ?? undefined);
       }
@@ -253,6 +293,7 @@ export function VideoCall({
 
     ch.on("broadcast", { event: "peer-left" }, ({ payload }) => {
       if (payload.sender === role) return;
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       setIsRemoteVideoOn(false);
       setCallStatus("waiting");
       toast({
@@ -271,17 +312,14 @@ export function VideoCall({
     channelRef.current = ch;
   }, [role, createPeer, sendSignal]);
 
-  // ── Auto-start for BOTH roles when roomCode is provided ───────────────────
+  // ── Auto-start ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!initialRoomCode || autoStartedRef.current) return;
     autoStartedRef.current = true;
-
     setRoomCode(initialRoomCode);
 
     const autoStart = async () => {
       setCallStatus("joining");
-      // FIX: Await the stream and pass it into joinChannel context so it's
-      // definitely populated in localStreamRef before any signaling starts.
       const stream = await startLocalMedia();
       if (!stream) {
         setCallStatus("idle");
@@ -298,6 +336,7 @@ export function VideoCall({
   // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
+      if (iceDisconnectTimerRef.current) clearTimeout(iceDisconnectTimerRef.current);
       stopStream(localStreamRef.current);
       stopStream(screenStreamRef.current);
       peerRef.current?.close();
@@ -309,10 +348,8 @@ export function VideoCall({
   const toggleVideo = async () => {
     try {
       if (isVideoOn) {
-        // Disable just the video track — keep audio alive
         localStreamRef.current?.getVideoTracks().forEach((t) => {
           t.stop();
-          // Remove from peer connection so remote also loses video
           peerRef.current?.getSenders()
             .filter((s) => s.track === t)
             .forEach((s) => peerRef.current?.removeTrack(s));
@@ -325,16 +362,11 @@ export function VideoCall({
         video: true,
         audio: isAudioOn,
       });
-      // Merge new video track into existing stream (keeps existing audio senders)
       stream.getVideoTracks().forEach((t) => {
         localStreamRef.current?.addTrack(t);
-        if (peerRef.current) {
-          peerRef.current.addTrack(t, localStreamRef.current!);
-        }
+        if (peerRef.current) peerRef.current.addTrack(t, localStreamRef.current!);
       });
-      if (!localStreamRef.current) {
-        localStreamRef.current = stream;
-      }
+      if (!localStreamRef.current) localStreamRef.current = stream;
       attachLocalStream(localStreamRef.current);
       setIsVideoOn(true);
       if (stream.getAudioTracks().length > 0) setIsAudioOn(true);
@@ -355,7 +387,6 @@ export function VideoCall({
       }
       const tracks = localStreamRef.current.getAudioTracks();
       if (isAudioOn) {
-        // Mute: just disable, don't remove (avoids renegotiation)
         tracks.forEach((t) => (t.enabled = false));
         setIsAudioOn(false);
       } else {
@@ -385,10 +416,7 @@ export function VideoCall({
         setIsScreenSharing(false);
         return;
       }
-      const display = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
+      const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       screenStreamRef.current = display;
       setIsScreenSharing(true);
 
@@ -442,7 +470,7 @@ export function VideoCall({
       a.click();
       URL.revokeObjectURL(url);
     };
-    recorder.start(1000); // collect data every second for reliability
+    recorder.start(1000);
     mediaRecorderRef.current = recorder;
     setIsRecording(true);
   };
@@ -450,13 +478,22 @@ export function VideoCall({
   // ── Leave ─────────────────────────────────────────────────────────────────
   const handleLeave = () => {
     sendSignal("peer-left", {});
+    if (iceDisconnectTimerRef.current) {
+      clearTimeout(iceDisconnectTimerRef.current);
+      iceDisconnectTimerRef.current = null;
+    }
     stopStream(localStreamRef.current);
     stopStream(screenStreamRef.current);
     localStreamRef.current = null;
     screenStreamRef.current = null;
     mediaRecorderRef.current?.stop();
-    peerRef.current?.close();
-    peerRef.current = null;
+    if (peerRef.current) {
+      peerRef.current.oniceconnectionstatechange = null;
+      peerRef.current.ontrack = null;
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
@@ -470,7 +507,7 @@ export function VideoCall({
     onLeave?.();
   };
 
-  // ── Candidate manual join (when no roomCode passed in) ────────────────────
+  // ── Candidate manual join ─────────────────────────────────────────────────
   const handleCandidateJoin = async () => {
     const code = roomCodeInput.trim().toUpperCase();
     if (!code) {
@@ -513,7 +550,7 @@ export function VideoCall({
   const isInCall = ["waiting", "connecting", "connected"].includes(callStatus);
   const initials = userName.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2);
 
-  // ── Candidate pre-call (only when no roomCode was passed) ─────────────────
+  // ── Candidate pre-call ────────────────────────────────────────────────────
   if (role === "candidate" && !isInCall && callStatus === "idle" && !initialRoomCode) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-6 p-8 bg-card rounded-xl">
@@ -540,16 +577,16 @@ export function VideoCall({
             onClick={handleCandidateJoin}
             disabled={callStatus === "joining"}
           >
-            {callStatus === "joining" ? (
-              <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Starting…</>
-            ) : "Join Call"}
+            {callStatus === "joining"
+              ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Starting…</>
+              : "Join Call"}
           </Button>
         </div>
       </div>
     );
   }
 
-  // ── Loading spinner (auto-starting camera) ────────────────────────────────
+  // ── Loading spinner ───────────────────────────────────────────────────────
   if (callStatus === "joining") {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-4 bg-card rounded-xl">
@@ -587,8 +624,19 @@ export function VideoCall({
 
       {/* Video area */}
       <div className="flex-1 relative bg-black overflow-hidden">
-        <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+        {/*
+          The remote <video> is ALWAYS mounted. We never unmount it —
+          only overlay the avatar on top when needed. This prevents
+          srcObject being lost on re-render.
+        */}
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className="w-full h-full object-cover"
+        />
 
+        {/* Avatar overlay — on top of video, shown only when no remote video */}
         {!isRemoteVideoOn && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-zinc-900">
             {callStatus === "waiting" ? (
@@ -640,50 +688,20 @@ export function VideoCall({
 
       {/* Controls */}
       <div className="px-4 py-3 flex items-center justify-center gap-2 flex-wrap border-t bg-background/80 backdrop-blur-sm">
-        <Button
-          size="icon"
-          variant={isAudioOn ? "default" : "secondary"}
-          className="rounded-full w-11 h-11"
-          onClick={toggleAudio}
-          title={isAudioOn ? "Mute microphone" : "Unmute microphone"}
-        >
+        <Button size="icon" variant={isAudioOn ? "default" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleAudio} title={isAudioOn ? "Mute" : "Unmute"}>
           {isAudioOn ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
         </Button>
-        <Button
-          size="icon"
-          variant={isVideoOn ? "default" : "secondary"}
-          className="rounded-full w-11 h-11"
-          onClick={toggleVideo}
-          title={isVideoOn ? "Turn off camera" : "Turn on camera"}
-        >
+        <Button size="icon" variant={isVideoOn ? "default" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleVideo} title={isVideoOn ? "Camera off" : "Camera on"}>
           {isVideoOn ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
         </Button>
-        <Button
-          size="icon"
-          variant={isScreenSharing ? "default" : "secondary"}
-          className="rounded-full w-11 h-11"
-          onClick={toggleScreenShare}
-          title={isScreenSharing ? "Stop sharing" : "Share screen"}
-        >
+        <Button size="icon" variant={isScreenSharing ? "default" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleScreenShare} title={isScreenSharing ? "Stop sharing" : "Share screen"}>
           {isScreenSharing ? <MonitorOff className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
         </Button>
-        <Button
-          size="icon"
-          variant={isRecording ? "destructive" : "secondary"}
-          className="rounded-full w-11 h-11"
-          onClick={toggleRecording}
-          title={isRecording ? "Stop recording" : "Start recording"}
-        >
+        <Button size="icon" variant={isRecording ? "destructive" : "secondary"} className="rounded-full w-11 h-11" onClick={toggleRecording} title={isRecording ? "Stop recording" : "Record"}>
           {isRecording ? <Square className="w-4 h-4" /> : <Circle className="w-4 h-4" />}
         </Button>
         <div className="w-px h-8 bg-border mx-1" />
-        <Button
-          size="icon"
-          variant="destructive"
-          className="rounded-full w-11 h-11"
-          onClick={handleLeave}
-          title="Leave call"
-        >
+        <Button size="icon" variant="destructive" className="rounded-full w-11 h-11" onClick={handleLeave} title="Leave">
           <Phone className="w-4 h-4 rotate-[135deg]" />
         </Button>
       </div>
