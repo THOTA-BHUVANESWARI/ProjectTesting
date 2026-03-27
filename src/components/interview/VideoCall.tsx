@@ -36,34 +36,32 @@ export function VideoCall({
   userName = "You",
   onLeave,
 }: VideoCallProps) {
-  const [roomCode, setRoomCode]             = useState(initialRoomCode ?? "");
-  const [roomCodeInput, setRoomCodeInput]   = useState("");
-  const [callStatus, setCallStatus]         = useState<CallStatus>("idle");
-  const [isVideoOn, setIsVideoOn]           = useState(false);
-  const [isAudioOn, setIsAudioOn]           = useState(false);
+  const [roomCode, setRoomCode]               = useState(initialRoomCode ?? "");
+  const [roomCodeInput, setRoomCodeInput]     = useState("");
+  const [callStatus, setCallStatus]           = useState<CallStatus>("idle");
+  const [isVideoOn, setIsVideoOn]             = useState(false);
+  const [isAudioOn, setIsAudioOn]             = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [isRecording, setIsRecording]       = useState(false);
-  const [isCopied, setIsCopied]             = useState(false);
-  const [remoteName, setRemoteName]         = useState("");
+  const [isRecording, setIsRecording]         = useState(false);
+  const [isCopied, setIsCopied]               = useState(false);
+  const [remoteName, setRemoteName]           = useState("");
   const [isRemoteVideoOn, setIsRemoteVideoOn] = useState(false);
 
-  const localVideoRef    = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef   = useRef<HTMLVideoElement>(null);
-  const screenVideoRef   = useRef<HTMLVideoElement>(null);
-  const localStreamRef   = useRef<MediaStream | null>(null);
-  const screenStreamRef  = useRef<MediaStream | null>(null);
-  const peerRef          = useRef<RTCPeerConnection | null>(null);
-  const channelRef       = useRef<RealtimeChannel | null>(null);
-  const makingOfferRef   = useRef(false);
-  const ignoreOfferRef   = useRef(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const localVideoRef     = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef    = useRef<HTMLVideoElement>(null);
+  const screenVideoRef    = useRef<HTMLVideoElement>(null);
+  const localStreamRef    = useRef<MediaStream | null>(null);
+  const screenStreamRef   = useRef<MediaStream | null>(null);
+  const peerRef           = useRef<RTCPeerConnection | null>(null);
+  const channelRef        = useRef<RealtimeChannel | null>(null);
+  const makingOfferRef    = useRef(false);
+  const ignoreOfferRef    = useRef(false);
+  const mediaRecorderRef  = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
-  const autoStartedRef   = useRef(false);
-  // FIX: track how many remote tracks we have received so we never flip
-  // isRemoteVideoOn back to false just because ICE briefly wobbles.
+  const autoStartedRef    = useRef(false);
   const remoteTrackCountRef = useRef(0);
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   const stopStream = (stream: MediaStream | null) => {
     stream?.getTracks().forEach((t) => t.stop());
@@ -113,49 +111,38 @@ export function VideoCall({
   // ── WebRTC ────────────────────────────────────────────────────────────────
 
   const createPeer = useCallback((streamOverride?: MediaStream) => {
-    // Close any existing connection cleanly first
     if (peerRef.current) {
-      peerRef.current.ontrack             = null;
-      peerRef.current.onicecandidate      = null;
+      peerRef.current.ontrack                    = null;
+      peerRef.current.onicecandidate             = null;
       peerRef.current.oniceconnectionstatechange = null;
-      peerRef.current.onnegotiationneeded = null;
+      peerRef.current.onnegotiationneeded        = null;
       peerRef.current.close();
       peerRef.current = null;
     }
 
-    remoteTrackCountRef.current = 0; // reset track counter for new connection
+    remoteTrackCountRef.current = 0;
 
     const pc = new RTCPeerConnection(RTC_CONFIG);
 
-    // Add local tracks SYNCHRONOUSLY before any negotiation can fire
     const stream = streamOverride ?? localStreamRef.current;
     if (stream) {
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     }
 
-    // FIX: ontrack — attach stream to the video element and KEEP it attached.
-    // We store the remote stream directly on the element and only show the
-    // avatar overlay when the stream has zero active video tracks.
     pc.ontrack = ({ track, streams }) => {
       remoteTrackCountRef.current += 1;
       const [remote] = streams;
 
-      // Attach once; subsequent tracks (audio) just add to the same stream
       if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remote) {
         remoteVideoRef.current.srcObject = remote;
         remoteVideoRef.current.play().catch(() => {});
       }
 
-      // Only count as "video on" if this track is actually a video track
       if (track.kind === "video") {
         setIsRemoteVideoOn(true);
         setCallStatus("connected");
 
-        // FIX: If the remote side turns off their camera, the track ends.
-        // Listen for that so we can show the avatar — but NEVER hide video
-        // just because ICE state changes.
         track.onended = () => {
-          // Check if any other video track is still live
           const stillHasVideo = (remoteVideoRef.current?.srcObject as MediaStream)
             ?.getVideoTracks()
             .some((t) => t.readyState === "live");
@@ -163,7 +150,6 @@ export function VideoCall({
         };
       }
 
-      // Audio track arrived → call is definitely connected even before video
       if (track.kind === "audio") {
         setCallStatus("connected");
       }
@@ -173,22 +159,19 @@ export function VideoCall({
       if (candidate) sendSignal("ice-candidate", candidate.toJSON());
     };
 
-    // FIX: Only go back to "waiting" on truly fatal ICE states, NOT on
-    // "disconnected" (which is transient and self-heals in most cases).
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
-        // Only hide remote video if we genuinely have no stream
+      const state = pc.iceConnectionState;
+
+      if (state === "connected" || state === "completed") {
+        // ── FIX: both sides mark themselves as connected on ICE completion ──
+        setCallStatus("connected");
+      }
+
+      if (state === "failed" || state === "closed") {
         if (remoteTrackCountRef.current === 0) {
           setIsRemoteVideoOn(false);
         }
         setCallStatus("waiting");
-      }
-      // "connected" / "completed" → we are good
-      if (
-        pc.iceConnectionState === "connected" ||
-        pc.iceConnectionState === "completed"
-      ) {
-        setCallStatus("connected");
       }
     };
 
@@ -208,6 +191,8 @@ export function VideoCall({
     return pc;
   }, [sendSignal]);
 
+  // ── Channel ───────────────────────────────────────────────────────────────
+
   const joinChannel = useCallback(async (code: string) => {
     if (channelRef.current) await supabase.removeChannel(channelRef.current);
 
@@ -215,6 +200,7 @@ export function VideoCall({
       config: { broadcast: { self: false } },
     });
 
+    // ── offer ──────────────────────────────────────────────────────────────
     ch.on("broadcast", { event: "offer" }, async ({ payload }) => {
       if (payload.sender === role) return;
       setRemoteName(payload.userName ?? "Peer");
@@ -248,6 +234,7 @@ export function VideoCall({
       }
     });
 
+    // ── answer ─────────────────────────────────────────────────────────────
     ch.on("broadcast", { event: "answer" }, async ({ payload }) => {
       if (payload.sender === role) return;
       const pc = peerRef.current;
@@ -260,6 +247,7 @@ export function VideoCall({
       }
     });
 
+    // ── ICE ────────────────────────────────────────────────────────────────
     ch.on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
       if (payload.sender === role) return;
       try {
@@ -269,6 +257,8 @@ export function VideoCall({
       }
     });
 
+    // ── peer-joined ────────────────────────────────────────────────────────
+    // Fired when someone first subscribes to the channel.
     ch.on("broadcast", { event: "peer-joined" }, ({ payload }) => {
       if (payload.sender === role) return;
       setRemoteName(payload.userName ?? "Peer");
@@ -276,15 +266,41 @@ export function VideoCall({
         title: "Someone joined",
         description: `${payload.userName ?? "A participant"} joined the room.`,
       });
-      // Only the interviewer (the "polite" peer) creates the offer
+
       if (role === "interviewer") {
+        // Interviewer always initiates the offer
         createPeer(localStreamRef.current ?? undefined);
+        // ── FIX: move out of "waiting" immediately so UI shows progress ──
+        setCallStatus("connecting");
+      } else {
+        // ── FIX: candidate echoes back so a refreshed interviewer knows
+        //         someone is already here and re-initiates ──────────────
+        sendSignal("peer-here", {});
       }
     });
 
+    // ── peer-here ──────────────────────────────────────────────────────────
+    // Fired by the candidate in response to peer-joined, so a freshly
+    // refreshed interviewer knows the candidate is already in the room.
+    ch.on("broadcast", { event: "peer-here" }, ({ payload }) => {
+      if (payload.sender === role) return;
+      setRemoteName(payload.userName ?? "Peer");
+
+      if (role === "interviewer") {
+        // Re-initiate the WebRTC handshake
+        createPeer(localStreamRef.current ?? undefined);
+        // ── FIX: same status fix as peer-joined ──────────────────────────
+        setCallStatus("connecting");
+      } else {
+        // Candidate received peer-here from interviewer — shouldn't normally
+        // happen, but handle symmetrically just in case
+        sendSignal("peer-here", {});
+      }
+    });
+
+    // ── peer-left ──────────────────────────────────────────────────────────
     ch.on("broadcast", { event: "peer-left" }, ({ payload }) => {
       if (payload.sender === role) return;
-      // FIX: when the other person leaves, clear their video stream properly
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = null;
       }
@@ -297,9 +313,14 @@ export function VideoCall({
       });
     });
 
+    // ── subscribe ──────────────────────────────────────────────────────────
     ch.subscribe((status) => {
       if (status === "SUBSCRIBED") {
+        // Announce presence to anyone already in the room
         sendSignal("peer-joined", {});
+        // ── FIX: also broadcast peer-here so a peer who is already
+        //         subscribed (e.g. after a page refresh) gets notified ──
+        sendSignal("peer-here", {});
         setCallStatus(role === "interviewer" ? "waiting" : "connecting");
       }
     });
@@ -308,6 +329,7 @@ export function VideoCall({
   }, [role, createPeer, sendSignal]);
 
   // ── Auto-start ────────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!initialRoomCode || autoStartedRef.current) return;
     autoStartedRef.current = true;
@@ -328,7 +350,8 @@ export function VideoCall({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRoomCode]);
 
-  // ── Cleanup on unmount ────────────────────────────────────────────────────
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+
   useEffect(() => {
     return () => {
       stopStream(localStreamRef.current);
@@ -339,12 +362,14 @@ export function VideoCall({
   }, []);
 
   // ── Camera toggle ─────────────────────────────────────────────────────────
+
   const toggleVideo = async () => {
     try {
       if (isVideoOn) {
         localStreamRef.current?.getVideoTracks().forEach((t) => {
           t.stop();
-          peerRef.current?.getSenders()
+          peerRef.current
+            ?.getSenders()
             .filter((s) => s.track === t)
             .forEach((s) => peerRef.current?.removeTrack(s));
         });
@@ -365,11 +390,16 @@ export function VideoCall({
       setIsVideoOn(true);
       if (stream.getAudioTracks().length > 0) setIsAudioOn(true);
     } catch {
-      toast({ title: "Camera Error", description: "Please allow camera permission.", variant: "destructive" });
+      toast({
+        title: "Camera Error",
+        description: "Please allow camera permission.",
+        variant: "destructive",
+      });
     }
   };
 
   // ── Mic toggle ────────────────────────────────────────────────────────────
+
   const toggleAudio = async () => {
     try {
       if (!localStreamRef.current) {
@@ -396,11 +426,16 @@ export function VideoCall({
         setIsAudioOn(true);
       }
     } catch {
-      toast({ title: "Microphone Error", description: "Please allow mic permission.", variant: "destructive" });
+      toast({
+        title: "Microphone Error",
+        description: "Please allow mic permission.",
+        variant: "destructive",
+      });
     }
   };
 
   // ── Screen share ──────────────────────────────────────────────────────────
+
   const toggleScreenShare = async () => {
     try {
       if (isScreenSharing) {
@@ -431,11 +466,16 @@ export function VideoCall({
         setIsScreenSharing(false);
       };
     } catch {
-      toast({ title: "Screen Share Error", description: "Unable to share screen.", variant: "destructive" });
+      toast({
+        title: "Screen Share Error",
+        description: "Unable to share screen.",
+        variant: "destructive",
+      });
     }
   };
 
   // ── Recording ─────────────────────────────────────────────────────────────
+
   const toggleRecording = () => {
     if (isRecording) {
       mediaRecorderRef.current?.stop();
@@ -444,7 +484,11 @@ export function VideoCall({
     }
     const stream = screenStreamRef.current || localStreamRef.current;
     if (!stream) {
-      toast({ title: "Recording Error", description: "Turn on camera first.", variant: "destructive" });
+      toast({
+        title: "Recording Error",
+        description: "Turn on camera first.",
+        variant: "destructive",
+      });
       return;
     }
     recordedChunksRef.current = [];
@@ -457,9 +501,9 @@ export function VideoCall({
     };
     recorder.onstop = () => {
       const blob = new Blob(recordedChunksRef.current, { type: "video/webm" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
       a.download = `recording-${roomCode}.webm`;
       a.click();
       URL.revokeObjectURL(url);
@@ -470,11 +514,12 @@ export function VideoCall({
   };
 
   // ── Leave ─────────────────────────────────────────────────────────────────
+
   const handleLeave = () => {
     sendSignal("peer-left", {});
     stopStream(localStreamRef.current);
     stopStream(screenStreamRef.current);
-    localStreamRef.current = null;
+    localStreamRef.current  = null;
     screenStreamRef.current = null;
     mediaRecorderRef.current?.stop();
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
@@ -495,6 +540,7 @@ export function VideoCall({
   };
 
   // ── Candidate manual join ─────────────────────────────────────────────────
+
   const handleCandidateJoin = async () => {
     const code = roomCodeInput.trim().toUpperCase();
     if (!code) {
@@ -516,13 +562,14 @@ export function VideoCall({
   };
 
   // ── Render helpers ────────────────────────────────────────────────────────
+
   const statusLabel: Record<CallStatus, string> = {
-    idle: "Not connected",
-    joining: "Starting…",
-    waiting: "Waiting for participant…",
+    idle:       "Not connected",
+    joining:    "Starting…",
+    waiting:    "Waiting for participant…",
     connecting: "Connecting…",
-    connected: "Connected",
-    error: "Connection error",
+    connected:  "Connected",
+    error:      "Connection error",
   };
 
   const statusColor: Record<CallStatus, string> = {
@@ -534,10 +581,11 @@ export function VideoCall({
     error:      "bg-red-500",
   };
 
-  const isInCall = ["waiting", "connecting", "connected"].includes(callStatus);
-  const initials = userName.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2);
+  const isInCall  = ["waiting", "connecting", "connected"].includes(callStatus);
+  const initials  = userName.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2);
 
-  // ── Candidate pre-call ────────────────────────────────────────────────────
+  // ── Candidate pre-call screen ─────────────────────────────────────────────
+
   if (role === "candidate" && !isInCall && callStatus === "idle" && !initialRoomCode) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-6 p-8 bg-card rounded-xl">
@@ -573,7 +621,8 @@ export function VideoCall({
     );
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────────
+  // ── Loading screen ────────────────────────────────────────────────────────
+
   if (callStatus === "joining") {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-4 bg-card rounded-xl">
@@ -583,7 +632,8 @@ export function VideoCall({
     );
   }
 
-  // ── IN-CALL ───────────────────────────────────────────────────────────────
+  // ── In-call UI ────────────────────────────────────────────────────────────
+
   return (
     <div className="h-full flex flex-col bg-card rounded-xl overflow-hidden">
 
@@ -595,23 +645,24 @@ export function VideoCall({
         </div>
         <div className="flex items-center gap-1.5">
           {callStatus === "connected"
-            ? <Wifi className="w-3.5 h-3.5 text-emerald-500" />
-            : <WifiOff className="w-3.5 h-3.5 text-amber-500" />}
+            ? <Wifi    className="w-3.5 h-3.5 text-emerald-500" />
+            : <WifiOff className="w-3.5 h-3.5 text-amber-500"   />}
           <button
             onClick={copyRoomCode}
             className="flex items-center gap-1.5 text-xs font-mono px-2 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors"
           >
             <span className="tracking-wider font-semibold">{roomCode}</span>
             {isCopied
-              ? <Check className="w-3 h-3 text-emerald-500" />
-              : <Copy className="w-3 h-3 text-muted-foreground" />}
+              ? <Check className="w-3 h-3 text-emerald-500"      />
+              : <Copy  className="w-3 h-3 text-muted-foreground" />}
           </button>
         </div>
       </div>
 
       {/* Video area */}
       <div className="flex-1 relative bg-black overflow-hidden">
-        {/* Remote video — always rendered in DOM so srcObject is never lost */}
+
+        {/* Remote video — always in DOM so srcObject is never lost */}
         <video
           ref={remoteVideoRef}
           autoPlay
@@ -620,14 +671,16 @@ export function VideoCall({
           style={{ display: isRemoteVideoOn ? "block" : "none" }}
         />
 
-        {/* Overlay shown ONLY when remote video is not active */}
+        {/* Overlay when remote video is inactive */}
         {!isRemoteVideoOn && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-zinc-900">
-            {callStatus === "waiting" ? (
+            {callStatus === "waiting" || callStatus === "connecting" ? (
               <>
                 <Loader2 className="w-10 h-10 text-zinc-500 animate-spin" />
                 <p className="text-zinc-400 text-sm">
-                  Waiting for {role === "interviewer" ? "candidate" : "interviewer"}…
+                  {callStatus === "waiting"
+                    ? `Waiting for ${role === "interviewer" ? "candidate" : "interviewer"}…`
+                    : "Connecting…"}
                 </p>
               </>
             ) : (
@@ -645,10 +698,16 @@ export function VideoCall({
           </div>
         )}
 
-        {/* Screen share PiP */}
+        {/* Screen-share PiP */}
         {isScreenSharing && (
           <div className="absolute top-3 left-3 w-56 aspect-video rounded-lg overflow-hidden border border-white/20 shadow-lg bg-black">
-            <video ref={screenVideoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
+            <video
+              ref={screenVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-contain"
+            />
             <Badge variant="secondary" className="absolute top-1 left-1 text-[10px] px-1 py-0">
               Screen
             </Badge>
@@ -658,11 +717,19 @@ export function VideoCall({
         {/* Local PiP */}
         <div className="absolute bottom-3 right-3 w-36 aspect-video rounded-lg overflow-hidden border border-white/20 shadow-lg bg-zinc-900">
           {isVideoOn ? (
-            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover scale-x-[-1]"
+            />
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center gap-1">
               <Avatar className="w-10 h-10">
-                <AvatarFallback className="text-sm bg-zinc-700 text-zinc-200">{initials}</AvatarFallback>
+                <AvatarFallback className="text-sm bg-zinc-700 text-zinc-200">
+                  {initials}
+                </AvatarFallback>
               </Avatar>
               <span className="text-[10px] text-zinc-400">You</span>
             </div>
@@ -681,6 +748,7 @@ export function VideoCall({
         >
           {isAudioOn ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
         </Button>
+
         <Button
           size="icon"
           variant={isVideoOn ? "default" : "secondary"}
@@ -690,6 +758,7 @@ export function VideoCall({
         >
           {isVideoOn ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
         </Button>
+
         <Button
           size="icon"
           variant={isScreenSharing ? "default" : "secondary"}
@@ -699,6 +768,7 @@ export function VideoCall({
         >
           {isScreenSharing ? <MonitorOff className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
         </Button>
+
         <Button
           size="icon"
           variant={isRecording ? "destructive" : "secondary"}
@@ -708,7 +778,9 @@ export function VideoCall({
         >
           {isRecording ? <Square className="w-4 h-4" /> : <Circle className="w-4 h-4" />}
         </Button>
+
         <div className="w-px h-8 bg-border mx-1" />
+
         <Button
           size="icon"
           variant="destructive"
